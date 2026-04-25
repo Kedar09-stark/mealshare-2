@@ -133,11 +133,12 @@ REST_FRAMEWORK = {
 # CORS (development) - allow local frontend ports
 # For production, replace with a stricter origin whitelist.
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    "CORS_ALLOWED_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173"
-).split(",")
-
+CORS_ALLOWED_ORIGINS = [
+    # "http://localhost:5173",
+    # "http://127.0.0.1:5173",
+    "https://mealshare-2.onrender.com",
+    "https://mealshare-2-1.onrender.com",
+]
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
