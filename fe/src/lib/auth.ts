@@ -5,7 +5,8 @@ export interface AuthUser {
   role: string;
 }
 
-export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+// export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://mealshare-2.onrender.com';
 
 export function getToken(): string | null {
   return localStorage.getItem('ms_token');
