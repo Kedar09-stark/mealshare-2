@@ -1,0 +1,343 @@
+import React, { useState, useEffect } from 'react';
+import { Button } from '../ui/button';
+import { AuthForm } from './AuthForm';
+import { UserRole } from '../../App';
+import { Link } from 'react-router-dom';
+import { apiRegister, setAuth, apiSendOTP, apiVerifyOTP } from '../../lib/auth';
+import { AlertCircle, CheckCircle2, Clock } from 'lucide-react';
+
+interface RegisterPageProps {
+  role: UserRole;
+  onBack: () => void;
+  onRegister: (role: UserRole) => void;
+}
+
+export function RegisterPage({ role, onBack, onRegister }: RegisterPageProps) {
+  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [businessLicenseNumber, setBusinessLicenseNumber] = useState('');
+  const [ngoRegistrationNumber, setNgoRegistrationNumber] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showOTPStep, setShowOTPStep] = useState(false);
+  const [otp, setOtp] = useState(['', '', '', '', '', '']);
+  const [otpError, setOtpError] = useState<string | null>(null);
+  const [timeLeft, setTimeLeft] = useState(600);
+  const [canResend, setCanResend] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
+  const [otpLoading, setOtpLoading] = useState(false);
+  const [otpSuccess, setOtpSuccess] = useState(false);
+  
+  const effectiveRole = role ?? 'ngo';
+
+  // OTP Timer
+  useEffect(() => {
+    if (!showOTPStep) return;
+    
+    const interval = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [showOTPStep]);
+
+  // Resend Countdown
+  useEffect(() => {
+    if (resendCountdown > 0) {
+      const interval = setInterval(() => {
+        setResendCountdown((prev) => prev - 1);
+      }, 1000);
+      return () => clearInterval(interval);
+    } else if (resendCountdown === 0 && canResend === false && showOTPStep) {
+      setCanResend(true);
+    }
+  }, [resendCountdown, showOTPStep]);
+
+  const handleRegister = () => {
+    if (!email || !password || !name || !username) return alert('Please fill all fields');
+    if (password !== confirmPassword) return alert('Passwords do not match');
+    if (effectiveRole === 'hotel' && !businessLicenseNumber) return alert('Please enter business license number');
+    if (effectiveRole === 'ngo' && !ngoRegistrationNumber) return alert('Please enter NGO registration number');
+    
+    (async () => {
+      try {
+        setLoading(true);
+        const payload: any = { username, email, password, role: effectiveRole ?? 'ngo' };
+        if (effectiveRole === 'hotel') {
+          payload.businessLicenseNumber = businessLicenseNumber;
+        } else if (effectiveRole === 'ngo') {
+          payload.ngoRegistrationNumber = ngoRegistrationNumber;
+        }
+        const res = await apiRegister(payload);
+        
+        // Send OTP to email
+        await apiSendOTP(email, 'registration');
+        setShowOTPStep(true);
+        setTimeLeft(600);
+        setCanResend(false);
+        setResendCountdown(0);
+      } catch (err: any) {
+        alert(err?.message || 'Registration failed');
+      } finally {
+        setLoading(false);
+      }
+    })();
+  };
+
+  const handleOtpChange = (index: number, value: string) => {
+    if (value.length > 1) {
+      const pastedOtp = value.split('').slice(0, 6 - index);
+      const newOtp = [...otp];
+      pastedOtp.forEach((digit, i) => {
+        if (index + i < 6) newOtp[index + i] = digit;
+      });
+      setOtp(newOtp);
+      const nextIndex = Math.min(index + pastedOtp.length, 5);
+      const nextInput = document.getElementById(`reg-otp-${nextIndex}`);
+      nextInput?.focus();
+    } else if (/^\d*$/.test(value)) {
+      const newOtp = [...otp];
+      newOtp[index] = value;
+      setOtp(newOtp);
+      if (value && index < 5) {
+        document.getElementById(`reg-otp-${index + 1}`)?.focus();
+      }
+    }
+  };
+
+  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !otp[index] && index > 0) {
+      document.getElementById(`reg-otp-${index - 1}`)?.focus();
+    }
+  };
+
+  const verifyOTP = async () => {
+    const otpCode = otp.join('');
+    if (otpCode.length !== 6) {
+      setOtpError('Please enter all 6 digits');
+      return;
+    }
+
+    setOtpLoading(true);
+    setOtpError(null);
+
+    try {
+      const response = await apiVerifyOTP(email, otpCode, 'registration');
+      setOtpSuccess(true);
+      
+      setTimeout(() => {
+        // Go back to landing page - user can now login with their account
+        onBack();
+      }, 1500);
+    } catch (err: any) {
+      setOtpError(err?.message || 'OTP verification failed');
+    } finally {
+      setOtpLoading(false);
+    }
+  };
+
+  const resendOTP = async () => {
+    setOtpLoading(true);
+    setOtpError(null);
+
+    try {
+      await apiSendOTP(email, 'registration');
+      setOtp(['', '', '', '', '', '']);
+      setTimeLeft(600);
+      setCanResend(false);
+      setResendCountdown(30);
+      setOtpSuccess(false);
+    } catch (err: any) {
+      setOtpError(err?.message || 'Failed to resend OTP');
+    } finally {
+      setOtpLoading(false);
+    }
+  };
+
+  const minutes = Math.floor(timeLeft / 60);
+  const seconds = timeLeft % 60;
+  const isExpired = timeLeft === 0;
+
+  if (showOTPStep) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-teal-50 via-white to-orange-50 flex flex-col">
+        <header className="px-6 py-4 border-b bg-white/80">
+          <div className="max-w-4xl mx-auto flex items-center justify-between">
+            <div className="text-xl font-semibold">Verify Email</div>
+            <Button variant="outline" onClick={onBack} disabled={otpLoading}>Back</Button>
+          </div>
+        </header>
+
+        <main className="flex-1 flex items-center justify-center py-12 px-4">
+          <div className="w-full max-w-md">
+            <div className="bg-white rounded-lg shadow-lg p-8">
+              {otpSuccess ? (
+                <div className="text-center space-y-4">
+                  <div className="flex justify-center">
+                    <CheckCircle2 className="w-16 h-16 text-green-500 animate-pulse" />
+                  </div>
+                  <h2 className="text-2xl font-bold text-gray-900">Email Verified!</h2>
+                  <p className="text-gray-600">Completing your registration...</p>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <div className="text-center space-y-2">
+                    <h2 className="text-2xl font-bold text-gray-900">Verify Your Email</h2>
+                    <p className="text-gray-600">
+                      We sent a 6-digit code to <span className="font-semibold text-gray-900">{email}</span>
+                    </p>
+                  </div>
+
+                  <div className={`flex items-center gap-2 p-3 rounded-lg ${
+                    isExpired
+                      ? 'bg-red-50 border border-red-200'
+                      : timeLeft < 120
+                        ? 'bg-yellow-50 border border-yellow-200'
+                        : 'bg-blue-50 border border-blue-200'
+                  }`}>
+                    <Clock className={`w-5 h-5 ${
+                      isExpired
+                        ? 'text-red-600'
+                        : timeLeft < 120
+                          ? 'text-yellow-600'
+                          : 'text-blue-600'
+                    }`} />
+                    <span className={`text-sm font-medium ${
+                      isExpired
+                        ? 'text-red-700'
+                        : timeLeft < 120
+                          ? 'text-yellow-700'
+                          : 'text-blue-700'
+                    }`}>
+                      {isExpired
+                        ? 'OTP has expired. Request a new one.'
+                        : `Expires in ${minutes}:${seconds.toString().padStart(2, '0')}`}
+                    </span>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="flex gap-3 justify-between">
+                      {otp.map((digit, index) => (
+                        <input
+                          key={index}
+                          id={`reg-otp-${index}`}
+                          type="text"
+                          maxLength={1}
+                          value={digit}
+                          onChange={(e) => handleOtpChange(index, e.target.value)}
+                          onKeyDown={(e) => handleKeyDown(index, e)}
+                          disabled={isExpired || otpLoading}
+                          className="w-12 h-14 text-center text-2xl font-bold border-2 border-gray-300 rounded-lg focus:outline-none focus:border-teal-500 disabled:bg-gray-100 disabled:text-gray-400 transition"
+                        />
+                      ))}
+                    </div>
+
+                    {otpError && (
+                      <div className="flex gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                        <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                        <p className="text-sm text-red-700">{otpError}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={verifyOTP}
+                    disabled={otpLoading || isExpired || otp.some((d) => !d)}
+                    className="w-full py-3 px-4 bg-teal-600 hover:bg-teal-700 disabled:bg-gray-300 text-white font-semibold rounded-lg transition duration-200 flex items-center justify-center gap-2"
+                  >
+                    {otpLoading ? (
+                      <>
+                        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" fill="none" strokeWidth="4" stroke="currentColor" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        Verifying...
+                      </>
+                    ) : (
+                      'Verify OTP'
+                    )}
+                  </button>
+
+                  <div className="flex items-center justify-between pt-2">
+                    <span className="text-sm text-gray-600">Didn't receive the code?</span>
+                    <button
+                      onClick={resendOTP}
+                      disabled={!canResend || otpLoading || (!isExpired && timeLeft > 30)}
+                      className={`text-sm font-semibold transition ${
+                        canResend && (isExpired || timeLeft <= 30)
+                          ? 'text-teal-600 hover:text-teal-700 cursor-pointer'
+                          : 'text-gray-400 cursor-not-allowed'
+                      }`}
+                    >
+                      {!canResend && resendCountdown > 0
+                        ? `Resend in ${resendCountdown}s`
+                        : isExpired || timeLeft <= 30
+                          ? 'Resend OTP'
+                          : 'Resend'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-teal-50 via-white to-orange-50 flex flex-col">
+      <header className="px-6 py-4 border-b bg-white/80">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div className="text-xl font-semibold">FoodShare — Register</div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={onBack}>Back</Button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 flex items-center justify-center py-12">
+        <div className="w-full px-4">
+          <div className="max-w-md mx-auto bg-white/80 p-6 rounded-lg shadow-sm">
+            <h2 className="text-2xl font-semibold text-center mb-4">Create {effectiveRole === 'hotel' ? 'Hotel / Donor' : 'NGO'} account</h2>
+            <p className="text-center text-sm text-gray-600 mb-6">Register to start listing or claiming donations</p>
+
+            <AuthForm
+              name={name}
+              setName={setName}
+              businessLicenseNumber={businessLicenseNumber}
+              setBusinessLicenseNumber={setBusinessLicenseNumber}
+              ngoRegistrationNumber={ngoRegistrationNumber}
+              setNgoRegistrationNumber={setNgoRegistrationNumber}
+              role={effectiveRole}
+              username={username}
+              setUsername={setUsername}
+              email={email}
+              setEmail={setEmail}
+              password={password}
+              setPassword={setPassword}
+              confirmPassword={confirmPassword}
+              setConfirmPassword={setConfirmPassword}
+              submitLabel={loading ? 'Creating...' : 'Create Account'}
+              onSubmit={handleRegister}
+              loading={loading}
+            />
+
+            <div className="mt-4 text-sm text-gray-600 text-center">
+              <span>Already have an account? </span>
+              <Link to={`/login?role=${effectiveRole}`} className="text-teal-700 underline">Sign in</Link>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}

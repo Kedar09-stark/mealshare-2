@@ -1,0 +1,39 @@
+# ======================
+# Python / Django
+# ======================
+be/venv/
+venv/
+.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.sqlite3
+
+# env
+.env
+.env.*
+
+# keep migrations, ignore only cache
+**/migrations/__pycache__/
+**/migrations/*.pyc
+
+# ======================
+# React / Vite
+# ======================
+fe/node_modules/
+fe/build/
+fe/dist/
+fe/.vite/
+
+# generic
+**/node_modules/
+**/build/
+**/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

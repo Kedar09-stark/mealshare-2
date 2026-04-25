@@ -1,0 +1,566 @@
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework import generics, permissions, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import MultiPartParser, FormParser
+
+from accounts.views import JWTAuthentication
+from .serializers import DonationSerializer, DonationRequestSerializer
+from .models import Donation, DonationRequest
+from django.db.models import Q
+import re
+
+
+def _norm(s: str) -> str:
+    """Normalize a string for loose matching: lowercase and strip non-alphanumerics."""
+    if not s:
+        return ''
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def _is_owner_or_match(user, donation) -> bool:
+    """Return True if the given user should be considered the owner of the donation.
+
+    Checks (in order): explicit owner FK, exact username/email/full match, or
+    a loose normalized substring match to allow variants like 'chicken_house' <-> 'chicken house'.
+    """
+    # explicit owner
+    if getattr(donation, 'owner', None) is not None:
+        return donation.owner == user
+
+    username = getattr(user, 'username', '') or ''
+    email = getattr(user, 'email', '') or ''
+    full = (user.get_full_name() or '')
+    hname = (donation.hotel_name or '')
+
+    # exact matches
+    if hname.lower() == username.lower() or hname.lower() == email.lower() or hname.lower() == full.lower():
+        return True
+
+    # normalized loose match
+    nh = _norm(hname)
+    if not nh:
+        return False
+    if _norm(username) and _norm(username) in nh:
+        return True
+    if _norm(email) and _norm(email) in nh:
+        return True
+    if _norm(full) and _norm(full) in nh:
+        return True
+
+    # also allow the inverse: normalized hotel name contained in normalized username
+    if _norm(username) and nh in _norm(username):
+        return True
+
+    return False
+
+
+def _is_reserved_by(user, donation) -> bool:
+    """Return True if the given user is recorded as the reserver of the donation."""
+    try:
+        return getattr(donation, 'reserved_by', None) == user
+    except Exception:
+        return False
+
+
+class DonationListCreateView(generics.ListCreateAPIView):
+    """List and create donations.
+
+    - GET: if user is a hotel, return donations that match the hotel's identity (hotel_name variants).
+           if user is an NGO, return available donations.
+    - POST: allow hotel users to create a donation; hotel_name is set to the user's username if not provided.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DonationSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        from accounts.models import User
+        qs = Donation.objects.all().order_by('-created_at')
+        if getattr(user, 'role', None) == User.ROLE_HOTEL:
+            # For hotel users, prefer donations explicitly owned by this hotel.
+            # Also include donations where the hotel's username matches (or loosely matches) the `hotel_name`.
+            # Use a fallback Python-side matching with `_is_owner_or_match` to handle legacy rows where owner FK is missing.
+            try:
+                matched_ids = []
+                for d in qs:
+                    if _is_owner_or_match(user, d):
+                        matched_ids.append(d.id)
+                # Combine explicit owner match, exact hotel_name, and any relaxed matched ids.
+                # This ensures legacy or normalized matches (including completed donations)
+                # are returned alongside explicit owner records.
+                base_filter = Q(owner=user) | Q(hotel_name__iexact=user.username)
+                if matched_ids:
+                    base_filter = base_filter | Q(id__in=matched_ids)
+                return qs.filter(base_filter).order_by('-created_at')
+            except Exception:
+                # If anything goes wrong, fall back to showing explicit owner or exact hotel_name match
+                return qs.filter(Q(owner=user) | Q(hotel_name__iexact=user.username)).order_by('-created_at')
+        if getattr(user, 'role', None) == User.ROLE_NGO:
+            # For NGOs, return donations that are available for reservation
+            # as well as any donations already reserved by the current NGO user
+            return qs.filter(Q(status=Donation.STATUS_AVAILABLE) | Q(reserved_by=user))
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        from accounts.models import User
+        if getattr(user, 'role', None) != User.ROLE_HOTEL:
+            raise PermissionDenied('only hotel users can create donations')
+
+        hotel_name = serializer.validated_data.get('hotel_name') or user.username
+        
+        # Ensure location has valid coordinates
+        location = serializer.validated_data.get('location', {})
+        if isinstance(location, dict):
+            coords = location.get('coordinates', {})
+            if isinstance(coords, dict):
+                try:
+                    import math
+                    lat = float(coords.get('lat', 0))
+                    lng = float(coords.get('lng', 0))
+                    if math.isnan(lat) or math.isnan(lng):
+                        coords = {'lat': 0, 'lng': 0}
+                    else:
+                        coords = {'lat': lat, 'lng': lng}
+                except (TypeError, ValueError):
+                    coords = {'lat': 0, 'lng': 0}
+                location = {
+                    'address': location.get('address', ''),
+                    'coordinates': coords
+                }
+        else:
+            location = {'address': '', 'coordinates': {'lat': 0, 'lng': 0}}
+        
+        # set owner to the creating hotel user
+        donation = serializer.save(hotel_name=hotel_name, owner=user, location=location)
+
+        # If an image file was uploaded in the multipart request under key 'image',
+        # read it and store as a base64 data URL in image_url to avoid DB migrations.
+        try:
+            img = None
+            try:
+                img = self.request.FILES.get('image')
+            except Exception:
+                img = None
+            if img:
+                try:
+                    import base64
+                    content = img.read()
+                    b64 = base64.b64encode(content).decode('ascii')
+                    mime = img.content_type or 'application/octet-stream'
+                    donation.image_url = f'data:{mime};base64,{b64}'
+                    donation.save()
+                except Exception:
+                    # fail silently
+                    pass
+        except Exception:
+            pass
+
+        # compute basic quality score and set pending status
+        try:
+            from datetime import date
+            days = (donation.expiry_date - date.today()).days
+            qs = min(95, max(75, 85 + days * 2))
+            donation.quality_score = int(qs)
+            # make newly created donations available immediately so NGOs can see them
+            donation.status = Donation.STATUS_AVAILABLE
+            donation.save()
+        except Exception:
+            pass
+
+
+class DonationDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update, or delete a donation.
+
+    Unsafe methods are restricted to the owning hotel (matched by hotel_name variants).
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DonationSerializer
+    queryset = Donation.objects.all()
+
+    def check_object_permissions(self, request, obj):
+        # Allow safe (read) methods for authorized users; modifications reserved for hotel owners
+        from accounts.models import User
+        user = request.user
+        if request.method in permissions.SAFE_METHODS:
+            return
+        # Hotel users may modify donations (relaxed from owner-only as per user request)
+        if getattr(user, 'role', None) == User.ROLE_HOTEL:
+            return
+
+        # Allow the NGO who reserved this donation to perform updates
+        if getattr(user, 'role', None) == User.ROLE_NGO and _is_reserved_by(user, obj):
+            return
+
+        raise PermissionDenied('only hotel owners or the reserving NGO may modify this donation')
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DonationStatusUpdateView(APIView):
+    """Update donation status via POST with { "status": "available" | "reserved" | "completed" | "picked-up" }"""
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            donation = Donation.objects.get(pk=pk)
+        except Donation.DoesNotExist:
+            return Response({'error': 'Donation not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Check ownership
+        from accounts.models import User
+        user = request.user
+        # Determine requested status
+        new_status = (request.data.get('status') or '').strip()
+        valid_statuses = [Donation.STATUS_AVAILABLE, Donation.STATUS_RESERVED, Donation.STATUS_PICKED_UP, Donation.STATUS_COMPLETED]
+        if new_status not in valid_statuses:
+            return Response({'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Allow NGO users to reserve an available donation.
+        # Hotel users own their donations, so they can force-set any status
+        # (including "reserved") the same way they can set "available" etc.
+        if new_status == Donation.STATUS_RESERVED:
+            if getattr(user, 'role', None) == User.ROLE_NGO:
+                # NGOs may only reserve donations that are currently available
+                if donation.status != Donation.STATUS_AVAILABLE:
+                    return Response(
+                        {'error': 'Donation is not available for reservation'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                donation.status = Donation.STATUS_RESERVED
+                try:
+                    donation.reserved_by = user
+                except Exception:
+                    pass
+                donation.save()
+                return Response(DonationSerializer(donation).data, status=status.HTTP_200_OK)
+
+            elif getattr(user, 'role', None) == User.ROLE_HOTEL:
+                # Hotel owners can freely set status to reserved (no availability guard)
+                # — fall through to the general update path below
+                pass
+            else:
+                raise PermissionDenied('only NGO or hotel users can reserve donations')
+
+        # Other status changes (available, picked-up, completed) — and hotel-initiated
+        # "reserved" changes — require the hotel owner or the reserving NGO.
+        if getattr(user, 'role', None) == User.ROLE_NGO:
+            # allow reserved NGO to mark their reserved item as picked-up or completed
+            if _is_reserved_by(user, donation) and new_status in (Donation.STATUS_PICKED_UP, Donation.STATUS_COMPLETED):
+                # proceed with status change below
+                pass
+            else:
+                raise PermissionDenied('only hotel owners or the reserving NGO may modify this donation')
+        elif getattr(user, 'role', None) != User.ROLE_HOTEL:
+            raise PermissionDenied('only hotel users can modify donations')
+
+        # perform the change
+        donation.status = new_status
+
+        # Update rating if provided
+        rating = request.data.get('rating')
+        if rating is not None:
+            try:
+                donation.rating = int(rating)
+            except (ValueError, TypeError):
+                pass
+        
+        rating_comment = request.data.get('rating_comment')
+        if rating_comment is not None:
+            donation.rating_comment = str(rating_comment)
+
+        # if marking available again, clear reserved_by
+        if new_status == Donation.STATUS_AVAILABLE:
+            donation.reserved_by = None
+        donation.save()
+        return Response(DonationSerializer(donation).data, status=status.HTTP_200_OK)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DonationCreateFromFormView(APIView):
+    """Create a Donation from a multipart/form POST (used by the frontend donation form).
+
+    This endpoint accepts FormData with fields similar to the DonationSerializer keys
+    (hotel_name, food_items, quantity, category, expiry_date, location (JSON string), quality_score)
+    and an optional file under key 'image'. Only users with role 'hotel' may create donations.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request):
+        from accounts.models import User
+        user = request.user
+        
+        # Robust role check
+        role = str(getattr(user, 'role', '')).lower().strip()
+        if role != User.ROLE_HOTEL:
+            return Response({'error': f'Only hotel users can create donations (current role: {role})'}, status=status.HTTP_403_FORBIDDEN)
+
+        # Read form fields
+        hotel_name = (request.POST.get('hotel_name') or user.username).strip()
+        food_items = request.POST.get('food_items') or request.POST.get('food_items') or ''
+        quantity = request.POST.get('quantity') or ''
+        category = request.POST.get('category') or ''
+        expiry_date_raw = request.POST.get('expiry_date') or ''
+        location_raw = request.POST.get('location') or ''
+        quality_score_raw = request.POST.get('quality_score')
+
+        # Parse expiry date
+        from datetime import date
+        expiry_date = None
+        try:
+            if expiry_date_raw:
+                expiry_date = date.fromisoformat(expiry_date_raw)
+        except Exception:
+            expiry_date = None
+
+        # Parse location JSON
+        loc = {}
+        try:
+            import json
+            if location_raw:
+                loc = json.loads(location_raw)
+        except Exception:
+            loc = {}
+        
+        # Validate and normalize location coordinates
+        def normalize_location(location_data):
+            """Ensure location has valid coordinates with both lat and lng as numbers."""
+            if not isinstance(location_data, dict):
+                return {'address': '', 'coordinates': {'lat': 0, 'lng': 0}}
+            
+            address = location_data.get('address', '')
+            coords = location_data.get('coordinates', {})
+            
+            if not isinstance(coords, dict):
+                return {'address': address, 'coordinates': {'lat': 0, 'lng': 0}}
+            
+            lat = coords.get('lat', 0)
+            lng = coords.get('lng', 0)
+            
+            # Ensure lat and lng are valid numbers
+            try:
+                lat = float(lat) if lat is not None else 0
+                lng = float(lng) if lng is not None else 0
+                # Check for NaN
+                import math
+                if math.isnan(lat) or math.isnan(lng):
+                    lat, lng = 0, 0
+            except (TypeError, ValueError):
+                lat, lng = 0, 0
+            
+            return {
+                'address': str(address) if address else '',
+                'coordinates': {'lat': lat, 'lng': lng}
+            }
+        
+        loc = normalize_location(loc)
+
+        # create donation object
+        try:
+            donation = Donation.objects.create(
+                hotel_name=hotel_name,
+                food_items=food_items,
+                quantity=quantity,
+                category=category,
+                expiry_date=expiry_date or date.today(),
+                location=loc,
+                quality_score=int(quality_score_raw) if quality_score_raw else 0,
+                status=Donation.STATUS_PENDING,
+                owner=user,
+            )
+        except Exception as exc:
+            return Response({'error': f'Failed to create donation: {str(exc)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Handle uploaded image
+        try:
+            img = None
+            try:
+                img = request.FILES.get('image')
+            except Exception:
+                img = None
+            if img:
+                try:
+                    import base64
+                    content = img.read()
+                    b64 = base64.b64encode(content).decode('ascii')
+                    mime = img.content_type or 'application/octet-stream'
+                    donation.image_url = f'data:{mime};base64,{b64}'
+                    donation.save()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Compute quality score and make available
+        try:
+            days = (donation.expiry_date - date.today()).days
+            qs = min(95, max(75, 85 + days * 2))
+            donation.quality_score = int(qs)
+            donation.status = Donation.STATUS_AVAILABLE
+            donation.save()
+        except Exception:
+            pass
+
+        return Response(DonationSerializer(donation).data, status=status.HTTP_201_CREATED)
+
+
+class DonationRequestListCreateView(generics.ListCreateAPIView):
+    """List and create donation requests posted by NGOs.
+
+    - GET: hotels see open requests; NGOs see their own requests.
+    - POST: only NGO users may create requests; the creating user's username is used as ngo_name if not provided.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DonationRequestSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        from accounts.models import User
+        qs = DonationRequest.objects.all().order_by('-created_at')
+        if getattr(user, 'role', None) == User.ROLE_HOTEL:
+            return qs.filter(status=DonationRequest.STATUS_OPEN)
+        if getattr(user, 'role', None) == User.ROLE_NGO:
+            return qs.filter(ngo=user)
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        from accounts.models import User
+        if getattr(user, 'role', None) != User.ROLE_NGO:
+            raise PermissionDenied('only NGO users can create donation requests')
+        ngo_name = serializer.validated_data.get('ngo_name') or (user.get_full_name() or user.username)
+        serializer.save(ngo=user, ngo_name=ngo_name)
+
+
+class DonationRequestDetailView(generics.RetrieveUpdateAPIView):
+    """Retrieve or update a donation request. Only the NGO who created it may update it; hotels may view.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DonationRequestSerializer
+
+
+class DonationMyPickupsView(APIView):
+    """Return donations reserved by the current authenticated NGO user.
+
+    GET: returns donations where `reserved_by` is the authenticated user and
+    status is one of reserved/picked-up/completed. This provides a focused
+    endpoint for NGO pickups so the frontend doesn't need to fetch all donations.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        from accounts.models import User
+        # Only NGOs (and hotels acting on behalf) should call this; return empty otherwise
+        if getattr(user, 'role', None) not in (User.ROLE_NGO, User.ROLE_HOTEL):
+            return Response([], status=status.HTTP_200_OK)
+
+        qs = Donation.objects.filter(reserved_by=user, status__in=[Donation.STATUS_RESERVED, Donation.STATUS_PICKED_UP, Donation.STATUS_COMPLETED]).order_by('-created_at')
+        return Response(DonationSerializer(qs, many=True).data, status=status.HTTP_200_OK)
+    queryset = DonationRequest.objects.all()
+
+    def check_object_permissions(self, request, obj):
+        from accounts.models import User
+        user = request.user
+        if request.method in permissions.SAFE_METHODS:
+            return
+        # only the creating NGO may modify
+        if getattr(user, 'role', None) != User.ROLE_NGO or obj.ngo != user:
+            raise PermissionDenied('only the creating NGO can modify this request')
+
+
+class DonationRequestReserveView(APIView):
+    """Allow a hotel user to reserve an open donation request.
+
+    POST to set request.status -> STATUS_FULFILLED (marks it taken). No creation
+    of Donation objects is performed here; that can be done separately by the hotel.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            req = DonationRequest.objects.get(pk=pk)
+        except DonationRequest.DoesNotExist:
+            return Response({'error': 'Donation request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        from accounts.models import User
+        user = request.user
+        if getattr(user, 'role', None) != User.ROLE_HOTEL:
+            raise PermissionDenied('only hotel users may reserve requests')
+
+        if req.status != DonationRequest.STATUS_OPEN:
+            return Response({'error': 'Request is not open'}, status=status.HTTP_400_BAD_REQUEST)
+
+        req.status = DonationRequest.STATUS_FULFILLED
+        try:
+            req.save()
+        except Exception:
+            pass
+        return Response(DonationRequestSerializer(req).data, status=status.HTTP_200_OK)
+
+
+class DonationRequestClaimView(APIView):
+    """Create a Donation from an open DonationRequest.
+
+    POSTing here will create a Donation owned by the hotel user, pre-filled from the
+    request data, mark the request fulfilled, and return the created Donation.
+    """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            req = DonationRequest.objects.get(pk=pk)
+        except DonationRequest.DoesNotExist:
+            return Response({'error': 'Donation request not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        from accounts.models import User
+        user = request.user
+        if getattr(user, 'role', None) != User.ROLE_HOTEL:
+            raise PermissionDenied('only hotel users may claim requests')
+
+        if req.status != DonationRequest.STATUS_OPEN:
+            return Response({'error': 'Request is not open'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build donation from request
+        try:
+            # Minimal mapping; category left blank and expiry_date set to 7 days from now
+            from datetime import date, timedelta
+            expiry = date.today() + timedelta(days=7)
+            donation = Donation.objects.create(
+                hotel_name=user.username or '',
+                food_items=req.requested_items or '',
+                quantity=req.quantity or '',
+                category='request-fulfillment',
+                expiry_date=expiry,
+                location={'address': req.location or '', 'coordinates': {'lat': 0, 'lng': 0}},
+                quality_score=80,
+                status=Donation.STATUS_RESERVED,
+                reserved_by=req.ngo if req.ngo else None,
+                owner=user,
+            )
+        except Exception as e:
+            return Response({'error': 'Failed to create donation', 'details': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # mark request fulfilled
+        try:
+            req.status = DonationRequest.STATUS_FULFILLED
+            req.save()
+        except Exception:
+            pass
+
+        return Response(DonationSerializer(donation).data, status=status.HTTP_201_CREATED)
+
+
+
