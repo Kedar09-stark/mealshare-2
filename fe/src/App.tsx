@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
+// Added HashRouter to fix 404 errors on Render static deployment
+import { BrowserRouter, HashRouter, Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { LandingPage } from './components/LandingPage';
 import { LoginPage } from './components/auth/LoginPage';
 import { RegisterPage } from './components/auth/RegisterPage';
@@ -312,16 +313,20 @@ function App() {
   }
 
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<LandingRoute />} />
-        <Route path="/login" element={<LoginRoute />} />
-        <Route path="/register" element={<RegisterRoute />} />
-        <Route path="/hotel/*" element={<HotelRoute />} />
-        <Route path="/ngo/*" element={<NGORoute />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <>
+      {/* <BrowserRouter> */}
+      <HashRouter>
+        <Routes>
+          <Route path="/" element={<LandingRoute />} />
+          <Route path="/login" element={<LoginRoute />} />
+          <Route path="/register" element={<RegisterRoute />} />
+          <Route path="/hotel/*" element={<HotelRoute />} />
+          <Route path="/ngo/*" element={<NGORoute />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </HashRouter>
+      {/* </BrowserRouter> */}
+    </>
   );
 }
 
