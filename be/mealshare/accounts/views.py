@@ -197,7 +197,7 @@ class SendOTPView(APIView):
 
 		try:
 			sg = SendGridAPIClient(os.environ.get('SENDGRID_API_KEY'))
-			sender_email = getattr(settings, 'EMAIL_HOST_USER', 'itwasme210@gmail.com')
+			sender_email = getattr(settings, 'EMAIL_HOST_USER', 'kedarsumit155@gmail.com')
 			
 			message = Mail(
 				from_email=sender_email,
