@@ -216,117 +216,104 @@ function App() {
     setVolunteers(volunteers.map(v => v.id === id ? { ...v, ...updates } : v));
   };
 
-  const handleLogout = (navigate?: (path: string) => void) => {
+  const handleLogout = () => {
     try { 
       clearAuth(); 
       sessionStorage.removeItem('messages:selectedConversation');
     } catch {}
     setUserRole(null);
-    if (navigate) navigate('/');
   };
-
-  function LandingRoute() {
-    const navigate = useNavigate();
-    return (
-      <LandingPage 
-        onSelectRole={(role) => {
-          setUserRole(role);
-          navigate(role === 'hotel' ? '/hotel' : '/ngo');
-        }}
-        onOpenAuth={(action, role) => {
-          navigate(`/${action}?role=${role}`);
-        }}
-      />
-    );
-  }
-
-  function LoginRoute() {
-    const navigate = useNavigate();
-    const location = useLocation();
-    const params = new URLSearchParams(location.search);
-    const role = (params.get('role') as UserRole) ?? 'ngo';
-    return (
-      <LoginPage 
-        role={role}
-        onBack={() => navigate('/')}
-        onLogin={(r) => {
-          setUserRole(r);
-          navigate(r === 'hotel' ? '/hotel' : '/ngo');
-        }}
-      />
-    );
-  }
-
-  function RegisterRoute() {
-    const navigate = useNavigate();
-    const location = useLocation();
-    const params = new URLSearchParams(location.search);
-    const role = (params.get('role') as UserRole) ?? 'ngo';
-    return (
-      <RegisterPage 
-        role={role}
-        onBack={() => navigate('/')}
-        onRegister={(r) => {
-          setUserRole(r);
-          navigate(r === 'hotel' ? '/hotel' : '/ngo');
-        }}
-      />
-    );
-  }
-
-  function HotelRoute() {
-    const navigate = useNavigate();
-    if (userRole !== 'hotel') return <Navigate to="/" replace />;
-    return (
-      <>
-        <HotelDashboard
-          donations={effectiveDonations}
-          addDonation={addDonation}
-          updateDonation={updateDonation}
-          donationRequests={effectiveRequests}
-          messages={effectiveMessages}
-          addMessage={addMessage}
-          onLogout={() => handleLogout(navigate)}
-        />
-        <Toaster />
-      </>
-    );
-  }
-
-  function NGORoute() {
-    const navigate = useNavigate();
-    if (userRole !== 'ngo') return <Navigate to="/" replace />;
-    return (
-      <>
-        <NGODashboard
-          donations={effectiveDonations}
-          updateDonation={updateDonation}
-          donationRequests={effectiveRequests}
-          addDonationRequest={addDonationRequest}
-          messages={effectiveMessages}
-          addMessage={addMessage}
-          onLogout={() => handleLogout(navigate)}
-        />
-        <Toaster />
-      </>
-    );
-  }
-
   return (
     <>
-      {/* <BrowserRouter> */}
       <HashRouter>
         <Routes>
-          <Route path="/" element={<LandingRoute />} />
-          <Route path="/login" element={<LoginRoute />} />
-          <Route path="/register" element={<RegisterRoute />} />
-          <Route path="/hotel/*" element={<HotelRoute />} />
-          <Route path="/ngo/*" element={<NGORoute />} />
+          <Route path="/" element={
+            <LandingPage 
+              onSelectRole={(role) => {
+                setUserRole(role);
+                window.location.hash = role === 'hotel' ? '#/hotel' : '#/ngo';
+              }}
+              onOpenAuth={(action, role) => {
+                window.location.hash = `#/${action}?role=${role}`;
+              }}
+            />
+          } />
+          <Route path="/login" element={
+            <LoginPageWrapper setUserRole={setUserRole} />
+          } />
+          <Route path="/register" element={
+            <RegisterPageWrapper setUserRole={setUserRole} />
+          } />
+          <Route path="/hotel/*" element={
+            userRole === 'hotel' ? (
+              <>
+                <HotelDashboard
+                  donations={effectiveDonations}
+                  addDonation={addDonation}
+                  updateDonation={updateDonation}
+                  donationRequests={effectiveRequests}
+                  messages={effectiveMessages}
+                  addMessage={addMessage}
+                  onLogout={() => { handleLogout(); window.location.hash = '#/'; }}
+                />
+                <Toaster />
+              </>
+            ) : <Navigate to="/" replace />
+          } />
+          <Route path="/ngo/*" element={
+            userRole === 'ngo' ? (
+              <>
+                <NGODashboard
+                  donations={effectiveDonations}
+                  updateDonation={updateDonation}
+                  donationRequests={effectiveRequests}
+                  addDonationRequest={addDonationRequest}
+                  messages={effectiveMessages}
+                  addMessage={addMessage}
+                  onLogout={() => { handleLogout(); window.location.hash = '#/'; }}
+                />
+                <Toaster />
+              </>
+            ) : <Navigate to="/" replace />
+          } />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </HashRouter>
-      {/* </BrowserRouter> */}
     </>
+  );
+}
+
+function LoginPageWrapper({ setUserRole }: { setUserRole: (role: UserRole) => void }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const role = (params.get('role') as UserRole) ?? 'ngo';
+  return (
+    <LoginPage 
+      role={role}
+      onBack={() => navigate('/')}
+      onLogin={(r) => {
+        setUserRole(r);
+        navigate(r === 'hotel' ? '/hotel' : '/ngo');
+      }}
+    />
+  );
+}
+
+function RegisterPageWrapper({ setUserRole }: { setUserRole: (role: UserRole) => void }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const role = (params.get('role') as UserRole) ?? 'ngo';
+  return (
+    <RegisterPage 
+      role={role}
+      onBack={() => navigate('/')}
+      onRegister={(r) => {
+        setUserRole(r);
+        navigate(r === 'hotel' ? '/hotel' : '/ngo');
+      }}
+    />
   );
 }
 

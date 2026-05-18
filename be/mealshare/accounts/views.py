@@ -165,6 +165,7 @@ class UserDetailView(APIView):
 
 # OTP handling views
 from django.core.mail import send_mail
+from django.conf import settings
 from .models import EmailOTP
 from .utils import generate_otp
 import time
@@ -196,7 +197,7 @@ class SendOTPView(APIView):
 			send_mail(
 				'MealShare OTP Verification',
 				f'Your OTP for MealShare is: {otp}\n\nThis OTP will expire in 10 minutes.',
-				'itwasme210@gmail.com',
+				settings.EMAIL_HOST_USER,
 				[email],
 				fail_silently=False,
 			)
