@@ -14,3 +14,4 @@ aiohttp==3.11.18
 whitenoise==6.9.0
 uvicorn[standard]==0.34.0
 asgiref==3.8.1
+sendgrid==6.12.5

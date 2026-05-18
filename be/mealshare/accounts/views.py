@@ -164,7 +164,9 @@ class UserDetailView(APIView):
 
 
 # OTP handling views
-from django.core.mail import send_mail
+import os
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 from django.conf import settings
 from .models import EmailOTP
 from .utils import generate_otp
@@ -194,13 +196,17 @@ class SendOTPView(APIView):
 		)
 
 		try:
-			send_mail(
-				'MealShare OTP Verification',
-				f'Your OTP for MealShare is: {otp}\n\nThis OTP will expire in 10 minutes.',
-				settings.EMAIL_HOST_USER,
-				[email],
-				fail_silently=False,
+			sg = SendGridAPIClient(os.environ.get('SENDGRID_API_KEY'))
+			sender_email = getattr(settings, 'EMAIL_HOST_USER', 'itwasme210@gmail.com')
+			
+			message = Mail(
+				from_email=sender_email,
+				to_emails=email,
+				subject='MealShare OTP Verification',
+				html_content=f'Your OTP for MealShare is: <strong>{otp}</strong><br><br>This OTP will expire in 10 minutes.'
 			)
+			sg.send(message)
+			
 			return Response({"message": "OTP sent successfully", "email": email}, status=status.HTTP_200_OK)
 		except Exception as e:
 			return Response({"error": f"Failed to send OTP: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
