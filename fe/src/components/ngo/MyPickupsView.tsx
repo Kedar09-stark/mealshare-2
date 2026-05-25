@@ -136,6 +136,16 @@ export function MyPickupsView({ updateDonation }: MyPickupsViewProps) {
     }
   };
 
+  const handleGetDirections = (donation: Donation) => {
+    if (donation.location?.address) {
+      const encodedAddress = encodeURIComponent(donation.location.address);
+      const mapsUrl = `https://www.google.com/maps/search/${encodedAddress}`;
+      window.open(mapsUrl, '_blank');
+    } else {
+      toast.error("Location not available");
+    }
+  };
+
   const renderDonationCard = (donation: Donation) => {
 
     return (
@@ -170,13 +180,23 @@ export function MyPickupsView({ updateDonation }: MyPickupsViewProps) {
           </div>
 
           {donation.status === "reserved" && (
-            <Button
-              onClick={()=>handleMarkPickedUp(donation)}
-              className="w-full bg-teal-600 hover:bg-teal-700"
-            >
-              <CheckCircle className="mr-2 h-4 w-4"/>
-              Mark Picked Up
-            </Button>
+            <div className="space-y-2">
+              <Button
+                onClick={() => handleGetDirections(donation)}
+                variant="outline"
+                className="w-full"
+              >
+                <Navigation className="mr-2 h-4 w-4"/>
+                Get Direction
+              </Button>
+              <Button
+                onClick={()=>handleMarkPickedUp(donation)}
+                className="w-full bg-teal-600 hover:bg-teal-700"
+              >
+                <CheckCircle className="mr-2 h-4 w-4"/>
+                Mark Picked Up
+              </Button>
+            </div>
           )}
 
         </CardContent>
